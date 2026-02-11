@@ -47,64 +47,57 @@ jobs:
       - name: Install Fastlane
         run: gem install fastlane
 
-      - name: Setup App Store Connect API Key for Fastlane
+      - name: Setup API Key
         env:
           API_KEY_P8: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8 }}
           API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
-          API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
         run: |
           mkdir -p ~/.appstoreconnect/private_keys
           echo "$API_KEY_P8" > ~/.appstoreconnect/private_keys/AuthKey_${API_KEY_ID}.p8
           chmod 600 ~/.appstoreconnect/private_keys/AuthKey_${API_KEY_ID}.p8
 
-      - name: Create Fastlane directory and files
+      - name: Create Fastlane config
         working-directory: ios/App
         env:
           TEAM_ID: ${{ secrets.TEAM_ID }}
-          API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
-          API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
         run: |
           mkdir -p fastlane
           
           cat > fastlane/Appfile << EOF
           app_identifier("com.fiscalexpress.app")
-          apple_id("brucetender@gmail.com")
           team_id("${TEAM_ID}")
           EOF
-          
-          cat > fastlane/Fastfile << 'FASTFILE'
+
+      - name: Create Fastfile
+        working-directory: ios/App
+        run: |
+          cat > fastlane/Fastfile << 'EOF'
           default_platform(:ios)
 
           platform :ios do
-            desc "Build and upload to TestFlight"
             lane :beta do
-              # Setup temporary keychain for CI
               setup_ci
               
-              # Setup API key
               api_key = app_store_connect_api_key(
                 key_id: ENV["API_KEY_ID"],
                 issuer_id: ENV["API_ISSUER_ID"],
-                key_filepath: File.expand_path("~/.appstoreconnect/private_keys/AuthKey_#{ENV['API_KEY_ID']}.p8"),
+                key_filepath: "#{Dir.home}/.appstoreconnect/private_keys/AuthKey_#{ENV['API_KEY_ID']}.p8",
                 duration: 1200,
                 in_house: false
               )
               
-              # Create/fetch certificate (cert will create if needed)
               cert(
                 api_key: api_key,
                 keychain_path: ENV["MATCH_KEYCHAIN_NAME"],
                 keychain_password: ENV["MATCH_KEYCHAIN_PASSWORD"]
               )
               
-              # Create/fetch provisioning profile
               sigh(
                 api_key: api_key,
                 app_identifier: "com.fiscalexpress.app",
                 force: true
               )
               
-              # Update Xcode project with signing settings
               update_code_signing_settings(
                 use_automatic_signing: false,
                 path: "App.xcodeproj",
@@ -114,28 +107,21 @@ jobs:
                 profile_name: lane_context[SharedValues::SIGH_NAME]
               )
               
-              # Build
               build_app(
                 workspace: "App.xcworkspace",
                 scheme: "App",
                 export_method: "app-store",
                 output_directory: "./build",
-                output_name: "FiscalExpress.ipa",
-                export_options: {
-                  provisioningProfiles: {
-                    "com.fiscalexpress.app" => lane_context[SharedValues::SIGH_NAME]
-                  }
-                }
+                output_name: "FiscalExpress.ipa"
               )
               
-              # Upload to TestFlight
               upload_to_testflight(
                 api_key: api_key,
                 skip_waiting_for_build_processing: true
               )
             end
           end
-          FASTFILE
+          EOF
 
       - name: Run Fastlane
         working-directory: ios/App
@@ -144,11 +130,9 @@ jobs:
           API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
           TEAM_ID: ${{ secrets.TEAM_ID }}
           FASTLANE_XCODEBUILD_SETTINGS_TIMEOUT: 180
-          FASTLANE_XCODEBUILD_SETTINGS_RETRIES: 5
-        run: |
-          fastlane beta
+        run: fastlane beta
 
-      - name: Upload IPA Artifact
+      - name: Upload IPA
         uses: actions/upload-artifact@v4
         if: always()
         with:
