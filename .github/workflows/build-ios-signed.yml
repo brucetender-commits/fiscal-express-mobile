@@ -112,11 +112,6 @@ jobs:
           API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
           API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
         run: |
-          xcrun notarytool store-credentials "AC_PASSWORD" \
-            --key ~/private_keys/AuthKey_${API_KEY_ID}.p8 \
-            --key-id ${API_KEY_ID} \
-            --issuer ${API_ISSUER_ID}
-          
           xcrun altool --upload-app \
             -f ~/export/*.ipa \
             -t ios \
@@ -129,40 +124,3 @@ jobs:
         with:
           name: FiscalExpress-iOS
           path: ~/export/*.ipa
-                duration: 500
-              )
-              
-              upload_to_testflight(
-                api_key: api_key,
-                ipa: "./build/FiscalExpress.ipa",
-                skip_waiting_for_build_processing: true
-              )
-            end
-          end
-          EOF
-
-      - name: Build App
-        working-directory: ios/App
-        env:
-          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
-          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
-          TEAM_ID: ${{ secrets.TEAM_ID }}
-        run: |
-          fastlane build
-        timeout-minutes: 20
-
-      - name: Upload to TestFlight
-        working-directory: ios/App
-        env:
-          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
-          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
-        run: |
-          fastlane upload
-        timeout-minutes: 10
-
-      - name: Upload IPA Artifact
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: FiscalExpress-iOS
-          path: ios/App/build/*.ipa
