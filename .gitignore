@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+build/
+
+# iOS
+ios/
+!ios/.gitkeep
+
+# Android
+android/
+!android/.gitkeep
+
+# Environment
+.env
+.env.local
+.env.production
+
+# IDE
+.idea/
+*.swp
+*.swo
+.vscode/settings.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Cache
+.cache/
+.parcel-cache/
+
+# Testing
+coverage/
