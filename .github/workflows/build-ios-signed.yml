@@ -59,6 +59,7 @@ jobs:
           API_KEY_P8: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8 }}
           API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
           API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          FASTLANE_XCODEBUILD_SETTINGS_TIMEOUT: 300
         run: |
           # Create API key file
           mkdir -p ~/private_keys
@@ -81,7 +82,7 @@ jobs:
           
           platform :ios do
             lane :beta do
-              # Setup API key for authentication
+              # Setup API key
               api_key = app_store_connect_api_key(
                 key_id: ENV["API_KEY_ID"],
                 issuer_id: ENV["API_ISSUER_ID"],
@@ -90,48 +91,34 @@ jobs:
                 in_house: false
               )
               
-              # Setup CI keychain (creates temporary keychain)
+              # Create CI keychain
               setup_ci
               
-              # Get or create distribution certificate
-              get_certificates(
+              # Get or create certificate (this will create if none exists)
+              cert(
                 api_key: api_key,
-                platform: "ios",
                 generate_apple_certs: true
               )
               
               # Get or create provisioning profile
-              get_provisioning_profile(
+              sigh(
                 api_key: api_key,
                 app_identifier: "com.fiscalexpress.app",
-                platform: "ios"
+                force: true
               )
               
-              # Update code signing settings
-              update_code_signing_settings(
-                use_automatic_signing: false,
-                team_id: ENV["TEAM_ID"],
-                code_sign_identity: "Apple Distribution",
-                profile_name: lane_context[SharedValues::SIGH_NAME]
-              )
-              
-              # Build the app
-              build_app(
+              # Build with automatic signing using the downloaded cert/profile
+              gym(
                 workspace: "App.xcworkspace",
                 scheme: "App",
                 export_method: "app-store",
                 output_directory: "./build",
                 output_name: "FiscalExpress.ipa",
-                clean: true,
-                export_options: {
-                  provisioningProfiles: {
-                    "com.fiscalexpress.app" => lane_context[SharedValues::SIGH_NAME]
-                  }
-                }
+                clean: true
               )
               
               # Upload to TestFlight
-              upload_to_testflight(
+              pilot(
                 api_key: api_key,
                 skip_waiting_for_build_processing: true,
                 skip_submission: true
@@ -145,8 +132,8 @@ jobs:
           cat fastlane/Fastfile
           echo "========================"
           
-          # Run fastlane
-          fastlane beta
+          # Run fastlane with verbose output
+          fastlane beta --verbose
 
       - name: Upload IPA artifact
         if: always()
