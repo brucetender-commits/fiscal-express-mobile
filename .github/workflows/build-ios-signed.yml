@@ -25,6 +25,14 @@ jobs:
       - name: Build web app
         run: npm run build
 
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.2'
+
+      - name: Install Fastlane
+        run: gem install fastlane
+
       - name: Setup Xcode
         uses: maxim-lobanov/setup-xcode@v1
         with:
@@ -46,63 +54,103 @@ jobs:
       - name: Setup App Store Connect API Key
         env:
           API_KEY_P8: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8 }}
+          API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
         run: |
           mkdir -p ~/private_keys
-          echo "$API_KEY_P8" > ~/private_keys/AuthKey_${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}.p8
-
-      - name: Build and Archive
-        working-directory: ios/App
-        run: |
-          xcodebuild archive \
-            -workspace App.xcworkspace \
-            -scheme App \
-            -configuration Release \
-            -archivePath $RUNNER_TEMP/App.xcarchive \
-            -allowProvisioningUpdates \
-            -authenticationKeyPath ~/private_keys/AuthKey_${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}.p8 \
-            -authenticationKeyID ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }} \
-            -authenticationKeyIssuerID ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }} \
-            DEVELOPMENT_TEAM=${{ secrets.TEAM_ID }} \
-            CODE_SIGN_STYLE=Automatic
-
-      - name: Export IPA
-        run: |
-          cat > $RUNNER_TEMP/ExportOptions.plist << EOF
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-              <key>method</key>
-              <string>app-store-connect</string>
-              <key>teamID</key>
-              <string>${{ secrets.TEAM_ID }}</string>
-              <key>uploadSymbols</key>
-              <true/>
-              <key>destination</key>
-              <string>upload</string>
-          </dict>
-          </plist>
-          EOF
+          echo "$API_KEY_P8" > ~/private_keys/AuthKey_${API_KEY_ID}.p8
           
-          xcodebuild -exportArchive \
-            -archivePath $RUNNER_TEMP/App.xcarchive \
-            -exportPath $RUNNER_TEMP/export \
-            -exportOptionsPlist $RUNNER_TEMP/ExportOptions.plist \
-            -allowProvisioningUpdates \
-            -authenticationKeyPath ~/private_keys/AuthKey_${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}.p8 \
-            -authenticationKeyID ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }} \
-            -authenticationKeyIssuerID ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          # Create API key JSON for Fastlane
+          cat > ~/private_keys/api_key.json << EOF
+          {
+            "key_id": "${API_KEY_ID}",
+            "issuer_id": "${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}",
+            "key": $(echo "$API_KEY_P8" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),
+            "in_house": false
+          }
+          EOF
 
-      - name: Upload to TestFlight
+      - name: Create certificate and provisioning profile
+        working-directory: ios/App
+        env:
+          TEAM_ID: ${{ secrets.TEAM_ID }}
+          API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
         run: |
-          xcrun altool --upload-app \
-            -f $RUNNER_TEMP/export/*.ipa \
-            -t ios \
-            --apiKey ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }} \
-            --apiIssuer ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          # Generate a new private key and CSR
+          openssl genrsa -out ~/private_keys/dist.key 2048
+          openssl req -new -key ~/private_keys/dist.key -out ~/private_keys/dist.csr -subj "/CN=FiscalExpress Distribution/O=$TEAM_ID/C=RO"
+          
+          # Create Fastlane directory
+          mkdir -p fastlane
+          
+          # Create Fastfile
+          cat > fastlane/Fastfile << 'FASTFILE'
+          default_platform(:ios)
+          
+          platform :ios do
+            lane :build_and_upload do
+              api_key = app_store_connect_api_key(
+                key_id: ENV["API_KEY_ID"],
+                issuer_id: ENV["API_ISSUER_ID"],
+                key_filepath: File.expand_path("~/private_keys/AuthKey_#{ENV['API_KEY_ID']}.p8")
+              )
+              
+              # Get or create certificate
+              cert(
+                api_key: api_key,
+                team_id: ENV["TEAM_ID"],
+                generate_apple_certs: true
+              )
+              
+              # Get or create provisioning profile
+              sigh(
+                api_key: api_key,
+                team_id: ENV["TEAM_ID"],
+                app_identifier: "com.fiscalexpress.app",
+                force: true
+              )
+              
+              # Update project signing
+              update_code_signing_settings(
+                use_automatic_signing: false,
+                path: "App.xcodeproj",
+                team_id: ENV["TEAM_ID"],
+                bundle_identifier: "com.fiscalexpress.app",
+                profile_name: lane_context[SharedValues::SIGH_NAME],
+                code_sign_identity: "iPhone Distribution"
+              )
+              
+              # Build
+              build_app(
+                workspace: "App.xcworkspace",
+                scheme: "App",
+                configuration: "Release",
+                export_method: "app-store",
+                output_directory: "./build",
+                output_name: "FiscalExpress.ipa"
+              )
+              
+              # Upload to TestFlight
+              upload_to_testflight(
+                api_key: api_key,
+                skip_waiting_for_build_processing: true,
+                skip_submission: true
+              )
+            end
+          end
+          FASTFILE
+
+      - name: Build and Upload with Fastlane
+        working-directory: ios/App
+        env:
+          TEAM_ID: ${{ secrets.TEAM_ID }}
+          API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          FASTLANE_XCODEBUILD_SETTINGS_TIMEOUT: 180
+        run: fastlane build_and_upload
 
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
         with:
           name: FiscalExpress-iOS
-          path: $RUNNER_TEMP/export/*.ipa
+          path: ios/App/build/*.ipa
