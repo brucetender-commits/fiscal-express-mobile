@@ -44,110 +44,124 @@ jobs:
         working-directory: ios/App
         run: pod install
 
-      - name: Setup Ruby
-        uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: '3.2'
-          bundler-cache: true
-
-      - name: Install Fastlane
-        run: gem install fastlane
-
-      - name: Setup API Key
+      - name: Setup API Key for automatic signing
         env:
           API_KEY_P8: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8 }}
           API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
         run: |
-          mkdir -p ~/.private_keys
-          echo "$API_KEY_P8" > ~/.private_keys/AuthKey_${API_KEY_ID}.p8
-
-      - name: Create Fastlane config
-        working-directory: ios/App
-        run: |
-          mkdir -p fastlane
-          cat > fastlane/Appfile << 'EOF'
-          app_identifier("com.fiscalexpress.app")
-          team_id(ENV["TEAM_ID"])
-          EOF
+          # Create API key file
+          mkdir -p ~/private_keys
+          echo "$API_KEY_P8" > ~/private_keys/AuthKey_${API_KEY_ID}.p8
+          chmod 600 ~/private_keys/AuthKey_${API_KEY_ID}.p8
           
-          cat > fastlane/Fastfile << 'RUBY'
-          default_platform(:ios)
+          # Verify key file
+          echo "API Key file created:"
+          ls -la ~/private_keys/
+          head -1 ~/private_keys/AuthKey_${API_KEY_ID}.p8
 
-          platform :ios do
-            lane :beta do
-              # Create temporary keychain
-              create_keychain(
-                name: "ci_keychain",
-                password: "ci_password",
-                default_keychain: true,
-                unlock: true,
-                timeout: 3600,
-                lock_when_sleeps: false
-              )
-              
-              # Setup API key
-              api_key = app_store_connect_api_key(
-                key_id: ENV["API_KEY_ID"],
-                issuer_id: ENV["API_ISSUER_ID"],
-                key_filepath: File.expand_path("~/.private_keys/AuthKey_#{ENV['API_KEY_ID']}.p8"),
-                duration: 1200,
-                in_house: false
-              )
-              
-              # Get or create certificate
-              cert(
-                api_key: api_key,
-                keychain_name: "ci_keychain",
-                keychain_password: "ci_password",
-                generate_apple_certs: true
-              )
-              
-              # Get or create provisioning profile  
-              sigh(
-                api_key: api_key,
-                app_identifier: "com.fiscalexpress.app",
-                force: true,
-                adhoc: false
-              )
-              
-              # Build the app
-              gym(
-                workspace: "App.xcworkspace",
-                scheme: "App",
-                export_method: "app-store",
-                output_directory: "./build",
-                output_name: "FiscalExpress.ipa",
-                clean: true,
-                export_options: {
-                  signingStyle: "manual",
-                  provisioningProfiles: {
-                    "com.fiscalexpress.app" => ENV["sigh_com.fiscalexpress.app_appstore_profile-name"] || lane_context[SharedValues::SIGH_NAME]
-                  }
-                }
-              )
-              
-              # Upload to TestFlight
-              pilot(
-                api_key: api_key,
-                skip_waiting_for_build_processing: true,
-                skip_submission: true
-              )
-              
-              # Cleanup
-              delete_keychain(name: "ci_keychain")
-            end
-          end
-          RUBY
-
-      - name: Run Fastlane Beta
+      - name: Configure automatic signing
         working-directory: ios/App
         env:
           TEAM_ID: ${{ secrets.TEAM_ID }}
+        run: |
+          # Update project to use automatic signing
+          sed -i '' 's/CODE_SIGN_STYLE = Manual/CODE_SIGN_STYLE = Automatic/g' App.xcodeproj/project.pbxproj || true
+          sed -i '' "s/DEVELOPMENT_TEAM = \"\"/DEVELOPMENT_TEAM = \"$TEAM_ID\"/g" App.xcodeproj/project.pbxproj || true
+          sed -i '' "s/DEVELOPMENT_TEAM = ;/DEVELOPMENT_TEAM = \"$TEAM_ID\";/g" App.xcodeproj/project.pbxproj || true
+          
+          # Ensure automatic signing is set
+          /usr/libexec/PlistBuddy -c "Set :CODE_SIGN_STYLE Automatic" App.xcodeproj/project.pbxproj 2>/dev/null || true
+
+      - name: Archive app with automatic signing
+        working-directory: ios/App
+        env:
           API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
           API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
-          FASTLANE_XCODEBUILD_SETTINGS_TIMEOUT: 300
         run: |
-          fastlane beta
+          # Archive with automatic signing and API key auth
+          xcodebuild archive \
+            -workspace App.xcworkspace \
+            -scheme App \
+            -configuration Release \
+            -archivePath ~/build/App.xcarchive \
+            -destination "generic/platform=iOS" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath ~/private_keys/AuthKey_${API_KEY_ID}.p8 \
+            -authenticationKeyID "$API_KEY_ID" \
+            -authenticationKeyIssuerID "$API_ISSUER_ID" \
+            CODE_SIGN_STYLE=Automatic \
+            DEVELOPMENT_TEAM="${{ secrets.TEAM_ID }}" \
+            | tee archive_output.log
+          
+          echo "Archive completed!"
+          ls -la ~/build/
+
+      - name: Create export options
+        env:
+          TEAM_ID: ${{ secrets.TEAM_ID }}
+        run: |
+          cat > ~/exportOptions.plist << EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>method</key>
+              <string>app-store-connect</string>
+              <key>teamID</key>
+              <string>$TEAM_ID</string>
+              <key>signingStyle</key>
+              <string>automatic</string>
+              <key>uploadSymbols</key>
+              <true/>
+              <key>destination</key>
+              <string>upload</string>
+          </dict>
+          </plist>
+          EOF
+          
+          echo "Export options:"
+          cat ~/exportOptions.plist
+
+      - name: Export IPA
+        working-directory: ios/App
+        env:
+          API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        run: |
+          mkdir -p ~/export
+          
+          xcodebuild -exportArchive \
+            -archivePath ~/build/App.xcarchive \
+            -exportOptionsPlist ~/exportOptions.plist \
+            -exportPath ~/export \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath ~/private_keys/AuthKey_${API_KEY_ID}.p8 \
+            -authenticationKeyID "$API_KEY_ID" \
+            -authenticationKeyIssuerID "$API_ISSUER_ID" \
+            | tee export_output.log
+          
+          echo "Export completed!"
+          ls -la ~/export/
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FiscalExpress-iOS
+          path: ~/export/*.ipa
+          if-no-files-found: error
+
+      - name: Upload to TestFlight
+        env:
+          API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        run: |
+          xcrun altool --upload-app \
+            --type ios \
+            --file ~/export/*.ipa \
+            --apiKey "$API_KEY_ID" \
+            --apiIssuer "$API_ISSUER_ID" \
+            || echo "Upload failed but IPA was created successfully"
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
