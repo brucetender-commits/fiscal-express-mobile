@@ -44,6 +44,12 @@ jobs:
         working-directory: ios/App
         run: pod install
 
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.2'
+          bundler-cache: true
+
       - name: Install Fastlane
         run: gem install fastlane
 
@@ -52,89 +58,100 @@ jobs:
           API_KEY_P8: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8 }}
           API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
         run: |
-          mkdir -p ~/.appstoreconnect/private_keys
-          echo "$API_KEY_P8" > ~/.appstoreconnect/private_keys/AuthKey_${API_KEY_ID}.p8
-          chmod 600 ~/.appstoreconnect/private_keys/AuthKey_${API_KEY_ID}.p8
+          mkdir -p ~/.private_keys
+          echo "$API_KEY_P8" > ~/.private_keys/AuthKey_${API_KEY_ID}.p8
 
       - name: Create Fastlane config
         working-directory: ios/App
-        env:
-          TEAM_ID: ${{ secrets.TEAM_ID }}
         run: |
           mkdir -p fastlane
-          
-          cat > fastlane/Appfile << EOF
+          cat > fastlane/Appfile << 'EOF'
           app_identifier("com.fiscalexpress.app")
-          team_id("${TEAM_ID}")
+          team_id(ENV["TEAM_ID"])
           EOF
-
-      - name: Create Fastfile
-        working-directory: ios/App
-        run: |
-          cat > fastlane/Fastfile << 'EOF'
+          
+          cat > fastlane/Fastfile << 'RUBY'
           default_platform(:ios)
 
           platform :ios do
             lane :beta do
-              setup_ci
+              # Create temporary keychain
+              create_keychain(
+                name: "ci_keychain",
+                password: "ci_password",
+                default_keychain: true,
+                unlock: true,
+                timeout: 3600,
+                lock_when_sleeps: false
+              )
               
+              # Setup API key
               api_key = app_store_connect_api_key(
                 key_id: ENV["API_KEY_ID"],
                 issuer_id: ENV["API_ISSUER_ID"],
-                key_filepath: "#{Dir.home}/.appstoreconnect/private_keys/AuthKey_#{ENV['API_KEY_ID']}.p8",
+                key_filepath: File.expand_path("~/.private_keys/AuthKey_#{ENV['API_KEY_ID']}.p8"),
                 duration: 1200,
                 in_house: false
               )
               
+              # Get or create certificate
               cert(
                 api_key: api_key,
-                keychain_path: ENV["MATCH_KEYCHAIN_NAME"],
-                keychain_password: ENV["MATCH_KEYCHAIN_PASSWORD"]
+                keychain_name: "ci_keychain",
+                keychain_password: "ci_password",
+                generate_apple_certs: true
               )
               
+              # Get or create provisioning profile  
               sigh(
                 api_key: api_key,
                 app_identifier: "com.fiscalexpress.app",
-                force: true
+                force: true,
+                adhoc: false
               )
               
-              update_code_signing_settings(
-                use_automatic_signing: false,
-                path: "App.xcodeproj",
-                team_id: ENV["TEAM_ID"],
-                bundle_identifier: "com.fiscalexpress.app",
-                code_sign_identity: "Apple Distribution",
-                profile_name: lane_context[SharedValues::SIGH_NAME]
-              )
-              
-              build_app(
+              # Build the app
+              gym(
                 workspace: "App.xcworkspace",
                 scheme: "App",
                 export_method: "app-store",
                 output_directory: "./build",
-                output_name: "FiscalExpress.ipa"
+                output_name: "FiscalExpress.ipa",
+                clean: true,
+                export_options: {
+                  signingStyle: "manual",
+                  provisioningProfiles: {
+                    "com.fiscalexpress.app" => ENV["sigh_com.fiscalexpress.app_appstore_profile-name"] || lane_context[SharedValues::SIGH_NAME]
+                  }
+                }
               )
               
-              upload_to_testflight(
+              # Upload to TestFlight
+              pilot(
                 api_key: api_key,
-                skip_waiting_for_build_processing: true
+                skip_waiting_for_build_processing: true,
+                skip_submission: true
               )
+              
+              # Cleanup
+              delete_keychain(name: "ci_keychain")
             end
           end
-          EOF
+          RUBY
 
-      - name: Run Fastlane
+      - name: Run Fastlane Beta
         working-directory: ios/App
         env:
+          TEAM_ID: ${{ secrets.TEAM_ID }}
           API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
           API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
-          TEAM_ID: ${{ secrets.TEAM_ID }}
-          FASTLANE_XCODEBUILD_SETTINGS_TIMEOUT: 180
-        run: fastlane beta
+          FASTLANE_XCODEBUILD_SETTINGS_TIMEOUT: 300
+        run: |
+          fastlane beta
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
-        if: always()
+        if: success()
         with:
           name: FiscalExpress-iOS
           path: ios/App/build/*.ipa
