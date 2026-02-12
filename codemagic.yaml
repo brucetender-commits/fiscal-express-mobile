@@ -38,11 +38,22 @@ workflows:
         script: |
           cd ios/App && pod install
       
+      - name: Debug - Check if private key exists
+        script: |
+          echo "Checking CERTIFICATE_PRIVATE_KEY..."
+          if [ -z "$CERTIFICATE_PRIVATE_KEY" ]; then
+            echo "ERROR: CERTIFICATE_PRIVATE_KEY is not set!"
+            exit 1
+          else
+            echo "CERTIFICATE_PRIVATE_KEY is set (length: ${#CERTIFICATE_PRIVATE_KEY})"
+          fi
+      
       - name: Fetch signing files
         script: |
           app-store-connect fetch-signing-files "$BUNDLE_ID" \
             --type IOS_APP_STORE \
-            --create
+            --create \
+            --certificate-key="$CERTIFICATE_PRIVATE_KEY"
       
       - name: Add certs to keychain
         script: |
