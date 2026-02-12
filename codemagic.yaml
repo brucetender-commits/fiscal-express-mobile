@@ -59,6 +59,11 @@ workflows:
         script: |
           xcode-project use-profiles
       
+      - name: Increment build number
+        script: |
+          cd ios/App
+          agvtool new-version -all $(($BUILD_NUMBER + 10))
+      
       - name: Build ipa for distribution
         script: |
           xcode-project build-ipa \
